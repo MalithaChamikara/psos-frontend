@@ -19,8 +19,8 @@ A small shop system. Customers view products and place orders. Administrators vi
 
 ### Step 1: Database
 1. Create a database named `PSOS_Database`.
-2. Run the table script, then `database/procedures.sql` (the table type and all stored procedures).
-3. Insert the sample products.
+2. Run the table scripts and insert scripts attached with the submitted email, then `Stored_Procedures.sql` 
+3. Insert the sample products using the insert script.
 
 ### Step 2: Backend
 Edit `PSOS-Api/appsettings.Development.json`:
@@ -28,7 +28,7 @@ Edit `PSOS-Api/appsettings.Development.json`:
 - `Jwt:Key`: a random secret of 32+ characters.
 
 ```
-API: `http://localhost:5213`, Swagger: `https://localhost:5213/swagger`
+API: `https://localhost:7156`, Swagger: `https://localhost:7156/swagger`
 
 ### Step 3: Frontend
 ```powershell
@@ -41,34 +41,16 @@ App: `http://localhost:5173` (this origin is allowed by the API's CORS policy). 
 ### Demo accounts (seeded in Development)
 | Username | Password | Role |
 |---|---|---|
-| `customer` | `Customer@123` | Customer |
-| `customer2` | `Customer@123` | Customer |
+| `customer1@gmail.com` | `Customer1@123` | Customer |
+| `customer2@gmail.com` | `Customer2@123` | Customer |
+| `customer3@gmail.com` | `Customer3@123` | Customer |
+| `customer4@gmail.com` | `Customer4@123` | Customer |
 | `admin` | `Admin@123` | Administrator |
 
 
 
-### Concurrency test (PowerShell)
-Reset Webcam HD stock to 1 first. Ten simultaneous orders for it should give **one `200` and nine `409`**, and the final stock is 0.
-
-```powershell
-$base = "https://localhost:7156"
-$login = Invoke-RestMethod "$base/api/auth/login" -Method Post -ContentType "application/json" `
-  -Body '{"username":"customer","password":"Customer@123"}'
-$token = $login.token
-
-$jobs = 1..10 | ForEach-Object {
-  Start-Job -ArgumentList $base, $token -ScriptBlock {
-    param($base, $token)
-    try {
-      Invoke-RestMethod "$base/api/orders" -Method Post -ContentType "application/json" `
-        -Headers @{ Authorization = "Bearer $token" } `
-        -Body '{"items":[{"productId":5,"quantity":1}]}' | Out-Null
-      "200"
-    } catch { [string][int]$_.Exception.Response.StatusCode }
-  }
-}
-$jobs | Wait-Job | Receive-Job | Group-Object | Select-Object Name, Count
-```
+### Concurrency test (Stored Procedure)
+Add a small delay inside the PlaceOrder stored procedure transaction.
 
 ---
 
@@ -92,10 +74,9 @@ flowchart LR
 |---|---|---|
 | `PSOS-BusinessObjects` | Entities (`User`, `Product`, `Order`, `OrderItem`) and the `Roles` constants. No dependencies. | none |
 | `PSOS-ApplicationService` | Business rules and use cases: validation, merging duplicate order lines, mapping a stock shortage to an exception. It also **defines** the interfaces (`IProductRepository`, `IPasswordHasher`, `ITokenService`, ...) and the DTOs. | BusinessObjects |
-| `PSOS-DataService` | Infrastructure. Implements the interfaces with plain ADO.NET, one stored procedure per operation, plus BCrypt hashing and JWT creation. | ApplicationService, BusinessObjects |
+| `PSOS-DataService` | Infrastructure. Implements the interfaces with plain ADO.NET, one stored procedure per operation |
 | `PSOS-Api` | HTTP layer: controllers, JWT authentication and authorization, Swagger, exception-to-HTTP mapping. It is the composition root, where all dependency injection is registered in `Program.cs`. | ApplicationService, DataService |
 
-**Why this structure:** dependencies point inward. `ApplicationService` cannot see SQL or ASP.NET. It calls `IOrderRepository`, and `DataService` supplies the implementation (dependency inversion). The business rules can be tested without a database, and the data access can be replaced without touching them. The brief asks for "a basic separation between the API and data access", and this gives that and a bit more.
 
 ### Request flow (placing an order)
 
@@ -145,15 +126,14 @@ A check-then-update in application code is unsafe, because two requests can both
 - **Authorization is enforced on the server** with `[Authorize(Roles = ...)]`. Only Customers place orders, and only Administrators see all orders and the low-stock list. Hiding links in React is only for convenience.
 - **The user id comes from the token**, never from the request, so a customer can't place or read orders as someone else.
 - **Errors**: a central exception handler returns `ProblemDetails`. A 500 never exposes the exception message.
-- **SQL injection**: every query uses parameters or stored procedures.
 
 ### Frontend
 
 ```
 src/
 ├── api/          axios client, typed endpoint functions, ApiError normalizer
-├── auth/         Zustand auth store, session helper, RequireAuth route guard
-├── stores/       Zustand cart store
+├── auth/          session helper, RequireAuth route guard
+├── stores/       Zustand cart store and auth store
 ├── hooks/        TanStack Query hooks (useProducts, usePlaceOrder, ...)
 ├── components/   AppLayout, ProductCard, OrderSummary, StockErrorAlert, PageState, ...
 ├── pages/        Login, Products, Orders, Admin
@@ -173,13 +153,11 @@ src/
 | Tool | Why |
 |---|---|
 | **.NET 10 Web API** | Required stack. Controllers with attributes give clear role-based authorization and Swagger support. |
-| **ADO.NET (`Microsoft.Data.SqlClient`)** | Every operation is a stored procedure, so an ORM adds little. ADO.NET gives direct control of the table-valued parameter and of transaction behavior, with no hidden queries. |
-| **SQL Server stored procedure + `UPDLOCK, HOLDLOCK`** | The brief names this as the recommended approach. The lock and the update live in the same transaction, so there is no gap between the check and the write. |
-| **Table-valued parameter** | Passes a multi-line order in one typed, set-based call. The alternatives (one call per line, or parsed strings) either split the transaction or are fragile. |
+| **ADO.NET (`Microsoft.Data.SqlClient`)** | Every operation is a stored procedure. ADO.NET gives direct control of the table-valued parameter and of transaction behavior, with no hidden queries. |
 | **JWT Bearer (`Microsoft.AspNetCore.Authentication.JwtBearer`)** | A stateless token the SPA sends in a header. The brief asks for "a basic login that returns a token". |
 | **BCrypt.Net-Next** | A slow, salted password hash. Plain or fast hashes such as SHA-256 are unsafe for passwords. |
 | **Swashbuckle (Swagger)** | Lets the API be tested with a Bearer token without any frontend, which is also useful for the demo. |
-| **`IExceptionHandler` + `ProblemDetails`** | One place maps domain exceptions to 400 / 401 / 409 / 500, so controllers stay thin and responses share one format. |
+
 
 ### Frontend
 | Tool | Why |
@@ -189,7 +167,7 @@ src/
 | **TanStack Query** | Handles caching, loading and error states and refetching for server data. After an order, invalidating the products and orders keys refreshes the UI without manual effect code. |
 | **Zustand** | Small store for client-only state (session and cart), with no provider tree. The axios interceptor can read it outside React. |
 | **Axios** | Interceptors attach the token and normalize every error into one `ApiError` type, so the UI reads `status`, `message` and `shortages` in a single way. |
-| **React Router** | Routing with a role-aware `RequireAuth` guard. |
+
 
 
 ---
